@@ -190,8 +190,8 @@ input bool            Inp_IncludeManualInSequence    = true;  // شمارش مع
 // LOCK + Logger
 input bool            Inp_EnableLock                 = true;
 input int             Inp_LockTTLSeconds             = 90;
-input bool            Inp_LoggerA                    = true;
-input bool            Inp_LogTradeTransactions       = true;
+input bool            Inp_LoggerA                    = false;
+input bool            Inp_LogTradeTransactions       = false;
 
 input bool           Inp_ShowManualNumbering = true;   // show numbering of manual open+pending trades in chart Comment()
 // UI: Manual Refresh Button (top-right, purple)
@@ -1135,8 +1135,8 @@ bool PositionsCapOK()
 {
   // v1.379: Total Cap includes Manual + EA
   const int openPos = CountAllActiveTradesSymbol();
-  const bool ok = (openPos < 4);
-  if(!ok) LogA("CAP", 0, RC_POSCAP_BLOCK, StringFormat("Total Cap Hit (Manual+EA)=%d max=4", openPos), (double)openPos);
+  const bool ok = (openPos < Inp_MaxPositions);
+  if(!ok) LogA("CAP", 0, RC_POSCAP_BLOCK, StringFormat("Total Cap Hit (Manual+EA)=%d max=%d", openPos, Inp_MaxPositions), (double)openPos);
   return ok;
 }
 
@@ -2979,15 +2979,15 @@ void Process()
     if(!UpdateATRNow())
     { LogA("ATR", 0, RC_ENV_BLOCK, "ATR read failed => fail-closed"); return; }
 
-  // v1.379: Total Cap (Manual + EA) = 4
+  // v1.379: Total Cap (Manual + EA)
   const int openPosNow = CountAllActiveTradesSymbol();
-  if(openPosNow >= 4)
+  if(openPosNow >= Inp_MaxPositions)
   {
     if(Inp_DeleteEAPendingsWhenCapHit)
     {
       DeleteAllEAPendings_LadderOnly("CAP", 0, RC_PENDING_DELETED);
       DeleteAutoAnchorPending("cap hit", RC_PENDING_DELETED);
-      LogA("CAP", 0, RC_POSCAP_BLOCK, StringFormat("CAP HIT Total=%d max=4", openPosNow));
+      LogA("CAP", 0, RC_POSCAP_BLOCK, StringFormat("CAP HIT Total=%d max=%d", openPosNow, Inp_MaxPositions));
     }
     return;
   }
@@ -3336,7 +3336,7 @@ void _TouchObject(const long chartId, const string name)
   if(ObjectGetInteger(chartId, name, OBJPROP_SELECTABLE, 0, sel))
      ObjectSetInteger(chartId, name, OBJPROP_SELECTABLE, sel);
 
-  if(type < 0) Print("");
+  if(type < 0) { /* no-op */ }
 }
 
 //--------------------------- Market data refresh (MQL5) ---------------------------//
