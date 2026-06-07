@@ -392,6 +392,67 @@ double Mid()
   return (bid+ask)*0.5;
 }
 
+//============================= Shared Utilities ===============================//
+
+void SafeReleaseHandle(int &handle)
+{
+  if(handle != INVALID_HANDLE) { IndicatorRelease(handle); handle = INVALID_HANDLE; }
+}
+
+void PrepareTrade()
+{
+  trade.SetExpertMagicNumber(Inp_MagicNumber);
+  trade.SetDeviationInPoints(Inp_DeviationPoints);
+}
+
+double SequenceSLDistPips(const int seqIndex)
+{
+  if(seqIndex == 1) return 300.0;
+  if(seqIndex == 2) return 200.0;
+  return 100.0;
+}
+
+double ComputeSLPrice(const double slDistPips, const int dir, const double entry)
+{
+  const double slVal = slDistPips * 10.0 * _Point;
+  double sl = (dir == 1) ? (entry - slVal) : (entry + slVal);
+  return NPrice(sl);
+}
+
+bool ClosePositionByTicket(const ulong pt)
+{
+  PrepareTrade();
+  return trade.PositionClose(pt);
+}
+
+void ComputeEMAAlignment(const double e20, const double e50, const double e100, const double e200,
+                         bool &bull, bool &bear)
+{
+  bull = (e20 > e50) && (e50 > e100);
+  bear = (e20 < e50) && (e50 < e100);
+
+  if(Inp_EMAOverlayRequireSlowVsLong)
+  {
+    bull = bull && (e100 > e200);
+    bear = bear && (e100 < e200);
+  }
+
+  if(Inp_EMAOverlayRequireFullAlignment)
+  {
+    bull = bull && (e20 > e50) && (e50 > e100) && (e100 > e200);
+    bear = bear && (e20 < e50) && (e50 < e100) && (e100 < e200);
+  }
+}
+
+void ReleaseCoreHandles()
+{
+  SafeReleaseHandle(g_atrHandle);
+  SafeReleaseHandle(g_emaHandle);
+  SafeReleaseHandle(g_atr14Handle);
+  SafeReleaseHandle(g_atr100Handle);
+  SafeReleaseHandle(g_trendMAHandle);
+}
+
 bool IsNettingAccount()
 {
   long mm = AccountInfoInteger(ACCOUNT_MARGIN_MODE);
@@ -469,12 +530,7 @@ void UpdateEquityKillSwitch()
         const ulong  pt  = (ulong)PositionGetInteger(POSITION_TICKET);
         const int    typ = (int)PositionGetInteger(POSITION_TYPE);
 
-        trade.SetExpertMagicNumber(Inp_MagicNumber);
-        trade.SetDeviationInPoints(Inp_DeviationPoints);
-
-        bool ok=false;
-        if(typ==POSITION_TYPE_BUY)  ok = trade.PositionClose(pt);
-        if(typ==POSITION_TYPE_SELL) ok = trade.PositionClose(pt);
+        const bool ok = ClosePositionByTicket(pt);
 
         LogA("KILL", (typ==POSITION_TYPE_BUY?1:-1),
              ok?RC_POS_CLOSED:RC_POS_CLOSE_FAIL,
@@ -516,12 +572,7 @@ void EnforceTimeStop()
     const ulong  pt  = (ulong)PositionGetInteger(POSITION_TICKET);
     const int    typ = (int)PositionGetInteger(POSITION_TYPE);
 
-    trade.SetExpertMagicNumber(Inp_MagicNumber);
-    trade.SetDeviationInPoints(Inp_DeviationPoints);
-
-    bool ok=false;
-    if(typ==POSITION_TYPE_BUY)  ok = trade.PositionClose(pt);
-    if(typ==POSITION_TYPE_SELL) ok = trade.PositionClose(pt);
+    const bool ok = ClosePositionByTicket(pt);
 
     LogA("TSTOP", (typ==POSITION_TYPE_BUY?1:-1),
          ok?RC_POS_CLOSED:RC_POS_CLOSE_FAIL,
@@ -1356,18 +1407,9 @@ void ComputeSL_AndTP(const int dir, const double entry, double &sl, double &tp, 
   const int totalActive = CountAllActiveTradesSymbol();
   const int nextIndex   = totalActive + 1; 
 
-  double slDistPts = 0.0; // In Pips (Standard 10 points for 5 digit broker)
+  const double slDistPts = SequenceSLDistPips(nextIndex);
 
-  if(nextIndex == 1) slDistPts = 300.0;      // Trade 1: 300 Pips
-  else if(nextIndex == 2) slDistPts = 200.0; // Trade 2: 200 Pips
-  else slDistPts = 100.0;                    // Trade 3 & 4: 100 Pips
-
-  double slVal = slDistPts * 10.0 * _Point; // Convert Pips to Price
-
-  if(dir==1) sl = entry - slVal;
-  else      sl = entry + slVal;
-  
-  sl = NPrice(sl);
+  sl = ComputeSLPrice(slDistPts, dir, entry);
 
   // Protected-NoSL: replace tight SL with catastrophic stop (risk envelope). TP logic remains structural/edge-based.
   if(Inp_ProtectedNoSL)
@@ -1655,8 +1697,7 @@ bool PlaceAutoAnchorStop(const int dir, const double entry, const double sl, con
   if(!CooldownOK()) return false;
   if(!EntryFarEnoughForStop(dir, entry)) return false;
 
-  trade.SetExpertMagicNumber(Inp_MagicNumber);
-  trade.SetDeviationInPoints(Inp_DeviationPoints);
+  PrepareTrade();
 
   const ENUM_ORDER_TYPE ot = (dir==+1)? ORDER_TYPE_BUY_STOP : ORDER_TYPE_SELL_STOP;
   if(!ValidateStopsDistances(ot, entry, sl, tp))
@@ -1764,8 +1805,7 @@ bool PlaceLimit(const int dir, const double level, const string tag, double lot)
   if(!ValidateStopsDistances(pendingType, level, sl, tp))
   { LogA("PEND", dir, RC_STOPS_BLOCK, "Stops/Freeze blocked", level); return false; }
 
-  trade.SetExpertMagicNumber(Inp_MagicNumber);
-  trade.SetDeviationInPoints(Inp_DeviationPoints);
+  PrepareTrade();
 
   const string cmt="HAB_PEX_L7@" + tag;
   bool ok=false;
@@ -1982,14 +2022,8 @@ void EnsureAnchorSLTP()
   const double currentTP = PositionGetDouble(POSITION_TP);
 
   // محاسبه SL جدید بر اساس سکانس
-  double slDistPts = 0.0;
-  if(seqNum == 1) slDistPts = 300.0;
-  else if(seqNum == 2) slDistPts = 200.0;
-  else slDistPts = 100.0;
-  
-  double slVal = slDistPts * 10.0 * _Point;
-  double newSL = (g_anchorDir == 1) ? entry - slVal : entry + slVal;
-  newSL = NPrice(newSL);
+  const double slDistPts = SequenceSLDistPips(seqNum);
+  double newSL = ComputeSLPrice(slDistPts, g_anchorDir, entry);
   
   // TP is optional (controlled by Inp_SetAnchorTP). SL is always applied.
   double newTP = 0.0, edge = 0.0; 
@@ -2075,14 +2109,8 @@ void CheckAndModifyManualTrades()
     }
 
     // SL distance by sequence (v1.379 rule)
-    double slDistPts = 0.0;
-    if(seqNum == 1) slDistPts = 300.0;
-    else if(seqNum == 2) slDistPts = 200.0;
-    else slDistPts = 100.0;
-
-    const double slVal = slDistPts * 10.0 * _Point;
-    double newSL = (dir == 1) ? (entry - slVal) : (entry + slVal);
-    newSL = NPrice(newSL);
+    const double slDistPts = SequenceSLDistPips(seqNum);
+    double newSL = ComputeSLPrice(slDistPts, dir, entry);
 
     // TP: structural edge-based (same as EA)
     double newTP = 0.0, edgeRef = 0.0;
@@ -2286,10 +2314,10 @@ bool EnsureEMAOverlayHandles()
 
 void ReleaseEMAOverlayHandles()
 {
-  if(g_ema20OHandle!=INVALID_HANDLE)  { IndicatorRelease(g_ema20OHandle);  g_ema20OHandle=INVALID_HANDLE; }
-  if(g_ema50OHandle!=INVALID_HANDLE)  { IndicatorRelease(g_ema50OHandle);  g_ema50OHandle=INVALID_HANDLE; }
-  if(g_ema100OHandle!=INVALID_HANDLE) { IndicatorRelease(g_ema100OHandle); g_ema100OHandle=INVALID_HANDLE; }
-  if(g_ema200OHandle!=INVALID_HANDLE) { IndicatorRelease(g_ema200OHandle); g_ema200OHandle=INVALID_HANDLE; }
+  SafeReleaseHandle(g_ema20OHandle);
+  SafeReleaseHandle(g_ema50OHandle);
+  SafeReleaseHandle(g_ema100OHandle);
+  SafeReleaseHandle(g_ema200OHandle);
   g_emaOverlayReady=false;
 }
 
@@ -2315,8 +2343,8 @@ bool EnsureEMARegimeHandles()
 
 void ReleaseEMARegimeHandles()
 {
-  if(g_emaReg100Handle!=INVALID_HANDLE) { IndicatorRelease(g_emaReg100Handle); g_emaReg100Handle=INVALID_HANDLE; }
-  if(g_emaReg200Handle!=INVALID_HANDLE) { IndicatorRelease(g_emaReg200Handle); g_emaReg200Handle=INVALID_HANDLE; }
+  SafeReleaseHandle(g_emaReg100Handle);
+  SafeReleaseHandle(g_emaReg200Handle);
   g_emaRegimeReady=false;
 }
 
@@ -2434,20 +2462,8 @@ bool EMAOverlayAligned(const int dir, string &why, double &e20, double &e50, dou
   // IMPORTANT: bar-close only => shift=1 (previous closed bar) to avoid flicker
   if(!GetEMAOverlayValues(1, e20, e50, e100, e200, why)) return false;
 
-  bool bull = (e20 > e50) && (e50 > e100);
-  bool bear = (e20 < e50) && (e50 < e100);
-
-  if(Inp_EMAOverlayRequireSlowVsLong)
-  {
-    bull = bull && (e100 > e200);
-    bear = bear && (e100 < e200);
-  }
-
-  if(Inp_EMAOverlayRequireFullAlignment)
-  {
-    bull = bull && (e20 > e50) && (e50 > e100) && (e100 > e200);
-    bear = bear && (e20 < e50) && (e50 < e100) && (e100 < e200);
-  }
+  bool bull=false, bear=false;
+  ComputeEMAAlignment(e20, e50, e100, e200, bull, bear);
 
   // For dashboards/telemetry: keep a simple GREEN/RED status (no YELLOW in v1.0.7 logic)
   g_emaBullStatus = (bull ? 2 : 0);
@@ -2480,20 +2496,8 @@ bool EMAOverlayAnchorValid(const int dir, string &why, double &e20, double &e50,
   const double o1 = r1[0].open;
 
   // Base alignment (reuse the same alignment options)
-  bool bull = (e20 > e50) && (e50 > e100);
-  bool bear = (e20 < e50) && (e50 < e100);
-
-  if(Inp_EMAOverlayRequireSlowVsLong)
-  {
-    bull = bull && (e100 > e200);
-    bear = bear && (e100 < e200);
-  }
-
-  if(Inp_EMAOverlayRequireFullAlignment)
-  {
-    bull = bull && (e20 > e50) && (e50 > e100) && (e100 > e200);
-    bear = bear && (e20 < e50) && (e50 < e100) && (e100 < e200);
-  }
+  bool bull=false, bear=false;
+  ComputeEMAAlignment(e20, e50, e100, e200, bull, bear);
 
   // Close vs EMA50 (timing quality)
   bool closeOK=true;
@@ -3064,7 +3068,7 @@ if(Inp_UseEMAOverlay && Inp_EMAOverlayBlockAutoEntries)
             const double lotA = NormalizeLot(Inp_EAAnchorLot);
             if(lotA>0.0)
             {
-              trade.SetDeviationInPoints(Inp_DeviationPoints);
+              PrepareTrade();
               bool ok=false;
               if(perm==+1) ok = trade.Buy(lotA, _Symbol);
               else         ok = trade.Sell(lotA, _Symbol);
@@ -3417,20 +3421,11 @@ double LV_GetATR(const int handle)
   return b[0];
 }
 
-double LV_MidPrice()
-{
-  double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
-  double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-  return (bid+ask)*0.5;
-}
+double LV_MidPrice() { return Mid(); }
 
 double LV_Pts(const int points){ return points*_Point; }
 
-double LV_NPrice(const double p)
-{
-  int d=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
-  return NormalizeDouble(p,d);
-}
+double LV_NPrice(const double p) { return NPrice(p); }
 
 bool LV_NewBar(const ENUM_TIMEFRAMES tf, datetime &last)
 {
@@ -3984,8 +3979,8 @@ bool LV_Init()
 void LV_Deinit()
 {
   LV_DeleteObjects();
-  if(g_lv_atrH1!=INVALID_HANDLE){ IndicatorRelease(g_lv_atrH1); g_lv_atrH1=INVALID_HANDLE; }
-  if(g_lv_atrM5!=INVALID_HANDLE){ IndicatorRelease(g_lv_atrM5); g_lv_atrM5=INVALID_HANDLE; }
+  SafeReleaseHandle(g_lv_atrH1);
+  SafeReleaseHandle(g_lv_atrM5);
   g_lv_hasContext=false;
   ArrayResize(g_lv_scored,0);
 }
@@ -4034,11 +4029,7 @@ void RefreshLevelsAndObjects()
 void FullRefreshNow()
 {
   // Recreate indicator handles to force clean state
-  if(g_atrHandle!=INVALID_HANDLE) { IndicatorRelease(g_atrHandle); g_atrHandle = INVALID_HANDLE; }
-  if(g_emaHandle!=INVALID_HANDLE)   { IndicatorRelease(g_emaHandle);   g_emaHandle   = INVALID_HANDLE; }
-  if(g_atr14Handle!=INVALID_HANDLE) { IndicatorRelease(g_atr14Handle); g_atr14Handle = INVALID_HANDLE; }
-  if(g_atr100Handle!=INVALID_HANDLE){ IndicatorRelease(g_atr100Handle);g_atr100Handle= INVALID_HANDLE; }
-  if(g_trendMAHandle!=INVALID_HANDLE) { IndicatorRelease(g_trendMAHandle); g_trendMAHandle = INVALID_HANDLE; }
+  ReleaseCoreHandles();
 
   EnsureATRHandle();
   if(Inp_EnableAutoAnchor) EnsureTrendPermissionHandles();
@@ -4066,8 +4057,7 @@ int OnInit()
   g_killSwitch  = false;
   g_killTime    = 0;
 
-  trade.SetExpertMagicNumber(Inp_MagicNumber);
-  trade.SetDeviationInPoints(Inp_DeviationPoints);
+  PrepareTrade();
 
   if(!AcquireLock()) return INIT_FAILED;
   if(!EnsureATRHandle()) { ReleaseLock(); return INIT_FAILED; }
@@ -4090,11 +4080,7 @@ void OnDeinit(const int reason)
 
   LV_Deinit();
 
-  if(g_atrHandle!=INVALID_HANDLE) { IndicatorRelease(g_atrHandle); g_atrHandle = INVALID_HANDLE; }
-  if(g_emaHandle!=INVALID_HANDLE)   { IndicatorRelease(g_emaHandle);   g_emaHandle   = INVALID_HANDLE; }
-  if(g_atr14Handle!=INVALID_HANDLE) { IndicatorRelease(g_atr14Handle); g_atr14Handle = INVALID_HANDLE; }
-  if(g_atr100Handle!=INVALID_HANDLE){ IndicatorRelease(g_atr100Handle);g_atr100Handle= INVALID_HANDLE; }
-  if(g_trendMAHandle!=INVALID_HANDLE) { IndicatorRelease(g_trendMAHandle); g_trendMAHandle = INVALID_HANDLE; }
+  ReleaseCoreHandles();
 
   ReleaseEMAOverlayHandles();
   ReleaseEMARegimeHandles();
