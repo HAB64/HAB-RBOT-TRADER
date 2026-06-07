@@ -683,7 +683,7 @@ bool EntryGovernanceOK()
 bool SpreadOK()
 {
   const long sp = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-  if(sp<=0) return false;
+  if(sp<=0) { LogA("GATE", 0, RC_SPREAD_BLOCK, StringFormat("Spread query returned %d (<=0) => fail-closed", (int)sp), (double)sp); return false; }
   const int maxSp = DynamicMaxSpreadPoints();
   const bool ok = (sp <= maxSp);
   if(!ok) LogA("GATE", 0, RC_SPREAD_BLOCK, StringFormat("Spread=%d > Max=%d", (int)sp, maxSp), (double)sp);
@@ -1464,9 +1464,11 @@ bool ModifyPositionSLTP_ByTicket(const ulong posTicket, const double sl, const d
 
   const bool ok = OrderSend(req,res);
   if(!ok)
-  { LogA("SLTP", 0, RC_ENV_BLOCK, StringFormat("OrderSend SLTP failed ret=%d", (int)res.retcode)); return false; }
+  { LogA("SLTP", 0, RC_ENV_BLOCK, StringFormat("OrderSend SLTP failed ticket=%I64u ret=%d (%s)", posTicket, (int)res.retcode, trade.ResultRetcodeDescription()), (double)posTicket); return false; }
 
-  return (res.retcode==10009 || res.retcode==10008);
+  if(res.retcode!=10009 && res.retcode!=10008)
+  { LogA("SLTP", 0, RC_ENV_BLOCK, StringFormat("OrderSend SLTP unexpected retcode ticket=%I64u ret=%d (%s)", posTicket, (int)res.retcode, trade.ResultRetcodeDescription()), (double)posTicket); return false; }
+  return true;
 }
 
 //=================== Order / Pending Management ====================//
@@ -1476,9 +1478,15 @@ bool DeleteOrderByTicket(const ulong ticket)
 
   // HARD SAFETY: ensure selected order belongs to managed symbol before removal.
   const string sym = ManagedSymbol();
-  if(OrderSelect(ticket))
+  if(!OrderSelect(ticket))
   {
-    if(OrderGetString(ORDER_SYMBOL)!=sym) return false;
+    LogA("DEL", 0, RC_PENDING_FAILED, StringFormat("Delete SKIP ticket=%I64u: OrderSelect failed (already filled/cancelled?)", ticket), (double)ticket);
+    return false;
+  }
+  if(OrderGetString(ORDER_SYMBOL)!=sym)
+  {
+    LogA("DEL", 0, RC_PENDING_FAILED, StringFormat("Delete SKIP ticket=%I64u: wrong symbol %s != %s", ticket, OrderGetString(ORDER_SYMBOL), sym), (double)ticket);
+    return false;
   }
 
   MqlTradeRequest req; ZeroMemory(req);
@@ -1489,7 +1497,7 @@ bool DeleteOrderByTicket(const ulong ticket)
   req.symbol = sym;
 
   const bool ok = OrderSend(req,res);
-  if(!ok) LogA("DEL", 0, RC_PENDING_FAILED, StringFormat("Delete FAIL ticket=%I64u ret=%d", ticket, (int)res.retcode), (double)ticket);
+  if(!ok) LogA("DEL", 0, RC_PENDING_FAILED, StringFormat("Delete FAIL ticket=%I64u ret=%d (%s)", ticket, (int)res.retcode, trade.ResultRetcodeDescription()), (double)ticket);
   return ok;
 }
 
@@ -1951,7 +1959,8 @@ void ManualSLTP_MarkInitialized(const ulong ticket)
 void EnsureAnchorSLTP()
 {
   if(!g_anchorActive) return;
-  if(!PositionSelectByTicket(g_anchorTicket)) return;
+  if(!PositionSelectByTicket(g_anchorTicket))
+  { LogA("ANCHOR_SLTP", 0, RC_ANCHOR_TP_SKIP, StringFormat("Anchor ticket=%I64u no longer selectable (closed?)", g_anchorTicket), (double)g_anchorTicket); return; }
 
   const string sym = (Inp_ManagedSymbol!="" ? Inp_ManagedSymbol : _Symbol);
   if(PositionGetString(POSITION_SYMBOL)!=sym) return;
@@ -2031,7 +2040,10 @@ void EnsureAnchorSLTP()
          (needModifyTP?targetTP:currentTP));
   }
   else
-    LogA("ANCHOR_SLTP", g_anchorDir, RC_ANCHOR_TP_SKIP, "SLTP modify failed", 0);
+    LogA("ANCHOR_SLTP", g_anchorDir, RC_ANCHOR_TP_SKIP,
+         StringFormat("SLTP modify failed ticket=%I64u newSL=%.2f newTP=%.2f ret=%d",
+                      g_anchorTicket, (needModifySL?newSL:currentSL), (needModifyTP?targetTP:currentTP), (int)trade.ResultRetcode()),
+         (double)g_anchorTicket);
 }
 
 //=================== مدیریت معاملات دستی ===================//
@@ -2137,7 +2149,8 @@ void CheckAndModifyManualTrades()
     else
     {
       LogA("MANUAL_SLTP", dir, RC_MANUAL_SKIP,
-           StringFormat("Failed to initialize manual SLTP ticket=%I64u", ticket),
+           StringFormat("Failed to initialize manual SLTP ticket=%I64u SL=%.2f TP=%.2f ret=%d",
+                       ticket, targetSL, targetTP, (int)trade.ResultRetcode()),
            entry);
     }
   }
@@ -2767,14 +2780,14 @@ void AutoAnchorEngine_PivotZoneStop()
   { LogA("AUTO", dir, RC_LEVEL_MISSING, "Pivot P missing => no AutoAnchor"); return; }
 
   const double m = Mid();
-  if(m<=0.0) return;
+  if(m<=0.0) { LogA("AUTO", dir, RC_ENV_BLOCK, "Mid() returned 0 => no AutoAnchor (invalid bid/ask)"); return; }
 
   if(Inp_AutoAnchorRequirePZone && !IsInsidePZone(m, P))
   { LogA("AUTO", dir, RC_AUTO_PZONE_BLOCK, "Market not in P-Zone(±$2) => no AutoAnchor", m); return; }
 
   const double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
   const double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
-  if(bid<=0 || ask<=0) return;
+  if(bid<=0 || ask<=0) { LogA("AUTO", dir, RC_ENV_BLOCK, "Invalid bid/ask in AutoAnchor engine"); return; }
 
   const int minPtsBroker = MathMax(StopLevelPoints(), FreezeLevelPoints());
   const int minPts = MathMax(Inp_MinDist_Points, minPtsBroker);
@@ -3976,8 +3989,10 @@ bool LV_Init()
   if(g_lv_atrM5==INVALID_HANDLE){ LV_DBG("Failed ATR(Filter) handle."); return false; }
 
   g_lv_lastH1=0; g_lv_lastM5=0;
-  LV_BuildContext();
-  LV_RecomputeAndDraw();
+  if(!LV_BuildContext())
+    LV_DBG("LV_Init: BuildContext returned false (history may not be loaded yet)");
+  if(!LV_RecomputeAndDraw())
+    LV_DBG("LV_Init: RecomputeAndDraw returned false (will retry on next timer)");
   return true;
 }
 
@@ -4040,8 +4055,13 @@ void FullRefreshNow()
   if(g_atr100Handle!=INVALID_HANDLE){ IndicatorRelease(g_atr100Handle);g_atr100Handle= INVALID_HANDLE; }
   if(g_trendMAHandle!=INVALID_HANDLE) { IndicatorRelease(g_trendMAHandle); g_trendMAHandle = INVALID_HANDLE; }
 
-  EnsureATRHandle();
-  if(Inp_EnableAutoAnchor) EnsureTrendPermissionHandles();
+  if(!EnsureATRHandle())
+    LogA("UI_REFRESH", 0, RC_ENV_BLOCK, "ATR handle re-creation failed during refresh");
+  if(Inp_EnableAutoAnchor)
+  {
+    if(!EnsureTrendPermissionHandles())
+      LogA("UI_REFRESH", 0, RC_ENV_BLOCK, "Trend permission handle re-creation failed during refresh");
+  }
 
   if(!RefreshMarketData(_Symbol)) { LogA("UI_REFRESH", 0, RC_ENV_BLOCK, "RefreshMarketData failed (no tick)"); return; }
   ChartRedraw(0);
@@ -4076,9 +4096,19 @@ int OnInit()
   if(!LV_Init()) { ReleaseLock(); return INIT_FAILED; }
 
   EventSetTimer(1);
-  CreateRefreshButton();
-  if(Inp_UseEMAOverlay) EnsureEMAOverlayHandles();
-  LogA("INIT", 0, RC_NONE, "EA INIT OK (HAB_XAU_ATP v1.013)");
+  if(!CreateRefreshButton())
+    LogA("INIT", 0, RC_ENV_BLOCK, "Refresh button creation failed at INIT");
+  if(Inp_UseEMAOverlay)
+  {
+    if(!EnsureEMAOverlayHandles())
+      LogA("INIT", 0, RC_ENV_BLOCK, "EMA overlay handle creation failed at INIT (auto entries will be fail-closed)");
+  }
+  if(Inp_UseEMARegimeFilter)
+  {
+    if(!EnsureEMARegimeHandles())
+      LogA("INIT", 0, RC_ENV_BLOCK, "EMA regime handle creation failed at INIT (auto entries will be fail-closed)");
+  }
+  LogA("INIT", 0, RC_NONE, "EA INIT OK (HAB_XAU_ATP v1.019)");
   return INIT_SUCCEEDED;
 }
 
@@ -4139,7 +4169,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
   if(deal == 0) return;
 
   if(!HistoryDealSelect(deal))
-  { if(doLog) PrintFormat("[HAB_L7][TTR] deal=%I64u select failed", deal); return; }
+  { PrintFormat("[HAB_L7][TTR] deal=%I64u HistoryDealSelect FAILED - entry/exit tracking may be incomplete", deal); return; }
 
   const long   deal_entry  = (long)HistoryDealGetInteger(deal, DEAL_ENTRY);
   const long   deal_reason = (long)HistoryDealGetInteger(deal, DEAL_REASON);
