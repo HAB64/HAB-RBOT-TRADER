@@ -6,6 +6,11 @@
 #ifndef HAB_PEX_PANEL_MQH
 #define HAB_PEX_PANEL_MQH
 
+//--- Ensure LADDER_SIZE is available (defined in main EA, guard for safety)
+#ifndef LADDER_SIZE
+#define LADDER_SIZE 11
+#endif
+
 //=====================================================================
 //                    PANEL CONFIGURATION
 //=====================================================================
