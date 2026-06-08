@@ -9,7 +9,6 @@
 #property description "HAB PEX Merged EA v2.3\n11-Level Pivot Ladder (S5..P..R5)\nAnchor + Basket Terminator + Manual + Auto Trade Management"
 
 #include <Trade\Trade.mqh>
-#include "HAB_PEX_Panel.mqh"
 
 //=====================================================================
 //                         ENUMS
@@ -196,6 +195,8 @@ input bool            Inp_EnableLog            = true;
 #define LADDER_SIZE 11
 #define LADDER_UP   5
 #define LADDER_DN   5
+
+#include "HAB_PEX_Panel.mqh"
 
 struct Level
   {
